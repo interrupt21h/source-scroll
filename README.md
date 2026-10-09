@@ -47,3 +47,58 @@ Dependencies: Qt for Python/PySide6 and Pygments. See https://doc.qt.io/qtforpyt
 ## Formatting controls
 
 The number gutter is measured from the selected font, with a separate gap before code. Lines wrap by measured pixel width, and all edges have padding. Adjust with `--margin 32 --line-spacing 1.2`.
+
+## Network wall: one canvas, multiple windows
+
+Upgrade **all machines** to this release. v3 and v4 network protocols are incompatible.
+
+`--canvas WIDTHxHEIGHT` defines the complete wall **after rotation**, in wall pixels. `--viewport X,Y,W,H` selects the rectangle that this window displays. Coordinates have their origin at the wall's upper-left corner, X increases rightward and Y downward. Rotation happens once across the entire wall, before each window crops its own rectangle. There is no independent wrapping or gutter at monitor boundaries.
+
+Example: three 1920×1080 screens side by side, total canvas 5760×1080:
+
+```bash
+# Left screen: also runs the leader
+./run.sh /usr/src/linux-cachyos --listen 0.0.0.0:47770 \
+  --canvas 5760x1080 --viewport 0,0,1920,1080 --screen 0
+
+# Middle screen: on this or another machine
+./run.sh --connect 192.168.1.10:47770 \
+  --viewport 1920,0,1920,1080 --screen 0
+
+# Right screen
+./run.sh --connect 192.168.1.10:47770 \
+  --viewport 3840,0,1920,1080 --screen 0
+```
+
+Replace the IP with the leader's reachable address. For windows on the same computer use `127.0.0.1:47770` and choose different `--screen` indices. Find indices with `./run.sh --list-screens`. `--view` is an alias for `--viewport`. Omit a viewport to preview the whole wall scaled down. The leader may show just its own viewport while streaming rows for the entire wall.
+
+Example of unequal monitor sizes and offsets:
+
+```bash
+# Wall 7590x2400, using the coordinates of a configured display arrangement
+./run.sh /usr/src/linux-cachyos --listen 0.0.0.0:47770 \
+  --canvas 7590x2400 --viewport 0,240,3840,2160 --screen 0
+./run.sh --connect 127.0.0.1:47770 --viewport 3840,0,1350,2400 --screen 1
+./run.sh --connect 127.0.0.1:47770 --viewport 5190,540,2400,1350 --screen 2
+```
+
+These screen indices are examples: use Qt's actual enumeration. Use one consistent coordinate system across the wall. Qt normally reports logical pixels, which differ from physical resolution under fractional scaling. Physical wall pixel rectangles can also be used; each viewport scales uniformly to fit its local window. Matching viewport and local window aspect ratios prevents letterboxing. Gaps in the arrangement remain gaps in the virtual wall.
+
+All clients receive the leader's highlighted rows, layout, rotation, font settings, pause and speed. Client directory, rotation, theme and font arguments do not override these shared settings. Clients keep local monitor selection and fullscreen controls. The leader controls pause/speed; those keys are ignored on clients. Install the same font on all machines for matching text rendering.
+
+The source checkout is needed only on the leader. Shuffle and file transitions remain shared. Snapshot updates run at about 20 Hz and local rendering at the configured frame rate. Clients extrapolate between snapshots for at most 250 ms; disconnected clients freeze and reconnect. This is visual LAN synchronization, not frame-locked output.
+
+### Connection troubleshooting
+
+The leader prints its listening address. The client shows connection errors in an overlay and terminal, including refusal, timeout, token mismatch and incompatible handshake. Both sides must use the new version. Allow inbound **TCP 47770** on the leader. For a direct cable bind to the leader's actual cable address, e.g. `--listen 10.254.0.1:47770`, and connect to that address. `0.0.0.0` is a listen address, never a client destination. WSL networking can require Windows port forwarding or mirrored networking; first verify connectivity to the listening TCP port from the client machine.
+
+Optional connection token: use the same `--token your-shared-token` on both sides. Transport is unencrypted TCP for trusted networks and transmits source text. Maximum 16 clients.
+
+### Verification
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python test_sync.py
+QT_QPA_PLATFORM=offscreen .venv/bin/python test_wall.py
+```
+
+The first tests two clients, pause/speed propagation and leader restart. The second stitches two client screenshots and verifies they equal the full rotated wall pixel-for-pixel.
