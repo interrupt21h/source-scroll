@@ -18,7 +18,7 @@ def pump(app, seconds):
 def options(**changes):
     values = dict(directory=Path(__file__).parent.resolve(), include='*.py', shuffle=False,
                   theme='monokai', max_file_bytes=2000000, font='DejaVu Sans Mono',
-                  font_size=24, line_spacing=1.2, margin=24, speed=45, fps=60,
+                  font_size=24, buffer_seconds=6, prefetch_files=8, line_spacing=1.2, margin=24, speed=45, fps=60,
                   rotation=-90, canvas=None, viewport=None, listen=None, connect=None, token='test')
     values.update(changes)
     return SimpleNamespace(**values)

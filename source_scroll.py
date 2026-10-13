@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rotated, continuously scrolling source viewer. Python 3.10+."""
 import argparse
-from collections import deque
+from collections import deque, OrderedDict
+from itertools import islice
 import fnmatch
 import math
 import os
@@ -10,6 +11,7 @@ import queue
 import random
 import threading
 import time
+import uuid
 
 from network_sync import SyncServer, SyncClient, endpoint
 from wall_geometry import canvas_size, viewport_rect
@@ -19,7 +21,7 @@ from pygments.lexers import get_lexer_for_filename, TextLexer
 from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QStaticText, QTextOption
 from PySide6.QtWidgets import QApplication, QWidget
 
 EXCLUDED = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.venv'}
@@ -148,7 +150,7 @@ class Viewer(QWidget):
         self.row_index = 0
         self.paused = False
         self.speed = args.speed
-        self.output = queue.Queue(maxsize=2)
+        self.output = queue.Queue(maxsize=args.prefetch_files)
         self.stop = threading.Event()
         self.server = SyncServer(endpoint(args.listen), args.token) if args.listen else None
         self.client = SyncClient(endpoint(args.connect), args.token) if args.connect else None
@@ -156,6 +158,12 @@ class Viewer(QWidget):
         self.remote_state = None
         self.last_publish = 0.0
         self.sync_status = ''
+        self.session = uuid.uuid4().hex
+        self.remote_session = None
+        self.remote_position = None
+        self.remote_font_key = None
+        self.text_cache = OrderedDict()
+        self.buffering = True
         if not self.client:
             threading.Thread(target=producer, args=(args, self.output, self.stop), daemon=True).start()
         self.last = time.monotonic()
@@ -173,8 +181,9 @@ class Viewer(QWidget):
     def fill(self):
         width, height = self.dimensions()
         columns = max(self.cell, width - self.code_x - self.margin)
-        target = math.ceil(height / self.line_height) + 4
-        while len(self.rows) < target:
+        target = math.ceil(height / self.line_height) + max(64, math.ceil(self.speed * self.args.buffer_seconds / self.line_height))
+        deadline = time.perf_counter() + .003
+        while len(self.rows) < target and time.perf_counter() < deadline:
             if not self.pending:
                 try:
                     name, lines = self.output.get_nowait()
@@ -185,7 +194,11 @@ class Viewer(QWidget):
                 self.pending.extend([('', []), ('', [])])
             number, segments = self.pending.popleft()
             for i, row in enumerate(wrap_line(segments, columns, self.metrics)):
-                self.rows.append((number if i == 0 else '·', row))
+                label = number if i == 0 else '·'
+                self.rows.append((label, row))
+                self.cached_text(label)
+                for text, color in row:
+                    self.cached_text(text)
 
     def tick(self):
         now = time.monotonic()
@@ -198,9 +211,13 @@ class Viewer(QWidget):
                 state, received, age = latest
                 self.remote_state = state
                 self.remote_dimensions = state['dimensions']
-                self.font.setFamily(state['font'])
-                self.font.setPixelSize(state['font_size'])
-                self.metrics = QFontMetricsF(self.font)
+                font_key = (state['font'], state['font_size'])
+                if font_key != self.remote_font_key:
+                    self.remote_font_key = font_key
+                    self.font.setFamily(state['font'])
+                    self.font.setPixelSize(state['font_size'])
+                    self.metrics = QFontMetricsF(self.font)
+                    self.text_cache.clear()
                 self.line_height = state['line_height']
                 self.margin = state['margin']
                 self.gutter_width = state['gutter_width']
@@ -210,7 +227,22 @@ class Viewer(QWidget):
                 self.paused = state['paused']
                 self.speed = state['speed']
                 elapsed = min(.25, age + max(0, now - received))
-                self.offset = state['offset'] + (0 if state['paused'] else state['velocity'] * elapsed)
+                target_position = state['row_index'] * self.line_height + state['offset'] + (0 if state['paused'] else state['velocity'] * elapsed)
+                new_session = state.get('session', '') != self.remote_session
+                if self.remote_position is None or new_session or state['paused']:
+                    self.remote_position = target_position
+                    self.remote_session = state.get('session', '')
+                else:
+                    if age + max(0, now - received) < .25:
+                        self.remote_position += state['velocity'] * dt
+                    error = target_position - self.remote_position
+                    if abs(error) > 2 * self.line_height:
+                        self.remote_position = target_position
+                    else:
+                        self.remote_position += error * (1 - math.exp(-dt / .12))
+                # Keep the interpolated cursor within the transmitted lookahead.
+                self.remote_position = max(state['row_index'] * self.line_height, self.remote_position)
+                self.offset = self.remote_position - state['row_index'] * self.line_height
                 while self.offset >= self.line_height and len(self.rows) > 1:
                     self.offset -= self.line_height
                     self.rows.popleft()
@@ -218,7 +250,12 @@ class Viewer(QWidget):
             self.update()
             return
         self.fill()
-        if not self.paused and len(self.rows) > math.ceil(self.dimensions()[1] / self.line_height) + 1:
+        visible = math.ceil(self.dimensions()[1] / self.line_height)
+        if len(self.rows) <= visible + 1:
+            self.buffering = True
+        elif len(self.rows) >= visible + max(4, math.ceil(self.speed / self.line_height)):
+            self.buffering = False
+        if not self.paused and not self.buffering:
             self.offset += self.speed * dt
             while self.offset >= self.line_height and self.rows:
                 self.offset -= self.line_height
@@ -227,9 +264,10 @@ class Viewer(QWidget):
             self.fill()
         if self.server and now - self.last_publish >= .04:
             self.last_publish = now
-            moving = not self.paused and len(self.rows) > math.ceil(self.dimensions()[1] / self.line_height) + 1
+            moving = not self.paused and not self.buffering
+            send_count = visible + max(8, math.ceil(self.speed * .5 / self.line_height))
             self.server.publish({
-                'time': now, 'rows': list(self.rows), 'offset': self.offset, 'row_index': self.row_index,
+                'time': now, 'session': self.session, 'rows': list(islice(self.rows, send_count)), 'offset': self.offset, 'row_index': self.row_index,
                 'paused': self.paused, 'speed': self.speed,
                 'velocity': self.speed if moving else 0,
                 'dimensions': self.dimensions(), 'canvas': self.args.canvas or (self.width(), self.height()),
@@ -238,6 +276,24 @@ class Viewer(QWidget):
                 'margin': self.margin, 'gutter_width': self.gutter_width, 'code_x': self.code_x,
             })
         self.update()
+
+    def cached_text(self, text):
+        key = (self.font.toString(), text)
+        entry = self.text_cache.get(key)
+        if entry is not None:
+            self.text_cache.move_to_end(key)
+            return entry
+        static = QStaticText(text)
+        static.setTextFormat(Qt.TextFormat.PlainText)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.NoWrap)
+        static.setTextOption(option)
+        static.prepare(font=self.font)
+        entry = (static, self.metrics.horizontalAdvance(text))
+        self.text_cache[key] = entry
+        if len(self.text_cache) > 8192:
+            self.text_cache.popitem(last=False)
+        return entry
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -282,19 +338,25 @@ class Viewer(QWidget):
         if not self.rows:
             p.setPen(QColor('#89b4fa'))
             p.drawText(QPointF(24, y), 'Waiting for leader…' if self.client else 'Scanning source directory…')
+        clip = p.clipBoundingRect()
         for number, segments in self.rows:
-            if y > height + self.line_height:
+            if y - self.metrics.ascent() > min(height + self.line_height, clip.bottom()):
                 break
+            if y + self.metrics.descent() < clip.top():
+                y += self.line_height
+                continue
             p.setPen(QColor('#596579'))
-            number_x = self.margin + self.gutter_width - self.metrics.horizontalAdvance(number)
-            p.drawText(QPointF(number_x, y), number)
+            number_text, number_width = self.cached_text(number)
+            number_x = self.margin + self.gutter_width - number_width
+            p.drawStaticText(QPointF(number_x, y - self.metrics.ascent()), number_text)
             x = self.code_x
             p.save()
             p.setClipRect(QRectF(self.code_x, self.margin, max(1, width - self.code_x - self.margin), max(1, height - 2 * self.margin)), Qt.ClipOperation.IntersectClip)
             for text, color in segments:
                 p.setPen(QColor(color))
-                p.drawText(QPointF(x, y), text)
-                x += self.metrics.horizontalAdvance(text)
+                static, advance = self.cached_text(text)
+                p.drawStaticText(QPointF(x, y - self.metrics.ascent()), static)
+                x += advance
             p.restore()
             y += self.line_height
         p.restore()
@@ -349,6 +411,8 @@ def main():
     parser.add_argument('--margin', type=int, default=24, help='Viewport and gutter padding in pixels')
     parser.add_argument('--line-spacing', type=float, default=1.2, help='Line-height multiplier')
     parser.add_argument('--font', default='DejaVu Sans Mono')
+    parser.add_argument('--buffer-seconds', type=float, default=6, help='Prepared text lookahead in seconds (minimum 64 rows)')
+    parser.add_argument('--prefetch-files', type=int, default=8, help='Background highlighted-file queue size')
     parser.add_argument('--fps', type=int, default=60)
     parser.add_argument('--rotation', type=int, choices=[-90, 0, 90, 180], default=-90)
     parser.add_argument('--screen', type=int, default=0, help='Zero-based Qt screen index')
@@ -368,6 +432,8 @@ def main():
     args.directory = (args.directory or Path('.')).expanduser().resolve()
     if not args.connect and not args.directory.is_dir():
         parser.error('directory must be an existing directory')
+    if not math.isfinite(args.buffer_seconds) or not 1 <= args.buffer_seconds <= 60 or not 1 <= args.prefetch_files <= 64:
+        parser.error('buffer-seconds must be 1–60 and prefetch-files 1–64')
     if args.margin < 0 or not math.isfinite(args.line_spacing) or not 1 <= args.line_spacing <= 3:
         parser.error('margin must be nonnegative and line-spacing must be between 1 and 3')
     if not math.isfinite(args.speed) or args.speed <= 0 or args.font_size < 6 or not 1 <= args.fps <= 240 or args.max_file_bytes < 1:

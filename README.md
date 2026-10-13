@@ -50,7 +50,7 @@ The number gutter is measured from the selected font, with a separate gap before
 
 ## Network wall: one canvas, multiple windows
 
-Upgrade **all machines** to this release. v3 and v4 network protocols are incompatible.
+Upgrade all machines to v5 for the buffering improvements. v4 and v5 use protocol 2; v3 is incompatible.
 
 `--canvas WIDTHxHEIGHT` defines the complete wall **after rotation**, in wall pixels. `--viewport X,Y,W,H` selects the rectangle that this window displays. Coordinates have their origin at the wall's upper-left corner, X increases rightward and Y downward. Rotation happens once across the entire wall, before each window crops its own rectangle. There is no independent wrapping or gutter at monitor boundaries.
 
@@ -102,3 +102,32 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python test_wall.py
 ```
 
 The first tests two clients, pause/speed propagation and leader restart. The second stitches two client screenshots and verifies they equal the full rotated wall pixel-for-pixel.
+
+## Smooth buffering (v5)
+
+- Highlights up to eight upcoming files in a bounded background queue.
+- Prepares at least 64 extra rows, or `--buffer-seconds` of lookahead at the current speed, whichever is greater.
+- Gives preparation a 3 ms budget per tick, checked between source lines, to avoid draining large files in one GUI callback. A single unusually long source line can exceed the budget.
+- Prepares and caches text fragments with Qt QStaticText; scroll frames reuse shaped text and its measured width.
+- Skips rows outside the local viewport. The cache is bounded to 8192 text/font combinations.
+- Uses low/high buffer thresholds so disk delays do not repeatedly stop and resume scrolling.
+- Sends only the full wall's visible rows plus network lookahead, rather than the entire prepared buffer.
+- Clients ease small position corrections over about 120 ms while retaining their local frame-rate animation. Pause snaps to the shared position, and leader session IDs reset interpolation after a restart.
+
+Existing canvas and viewport commands continue to work. For more lookahead:
+
+```bash
+./run.sh /usr/src/linux-cachyos --listen 0.0.0.0:47770 \
+  --canvas 7358x2075 --viewport 1366,525,2750,1550 \
+  --buffer-seconds 12 --prefetch-files 12
+```
+
+These controls affect preparation on the leader; the default is six seconds and eight files. More file prefetch increases memory usage. Actual animation is still limited by the monitor refresh rate, compositor, network jitter and system load.
+
+Buffer starvation check:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python test_buffer.py
+```
+
+This confirms the extra prepared rows and glyph cache exist, then stops supplying source rows and checks that buffered motion continues.
