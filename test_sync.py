@@ -18,7 +18,7 @@ def pump(app, seconds):
 def options(**changes):
     values = dict(directory=Path(__file__).parent.resolve(), include='*.py', shuffle=False,
                   theme='monokai', max_file_bytes=2000000, font='DejaVu Sans Mono',
-                  font_size=24, buffer_seconds=6, prefetch_files=8, line_spacing=1.2, margin=24, speed=45, fps=60,
+                  font_size=24, buffer_seconds=6, prefetch_files=8, line_spacing=1.2, margin=24, bottom_margin=0, speed=45, fps=60,
                   rotation=-90, canvas=None, viewport=None, listen=None, connect=None, token='test')
     values.update(changes)
     return SimpleNamespace(**values)
@@ -41,12 +41,12 @@ def main():
     for client in (follower, second):
         assert client.remote_state and client.rows
         assert client.remote_dimensions == list(leader.dimensions())
-        assert client.remote_state['rows'][0] == json.loads(json.dumps(list(leader.rows)[0]))
         assert abs((client.row_index - leader.row_index) * leader.line_height + client.offset - leader.offset) < 8
     leader.paused = True
     pump(app, .3)
     for client in (follower, second):
         assert client.paused
+        assert client.remote_state['rows'][0] == json.loads(json.dumps(list(leader.rows)[0]))
         assert abs((client.row_index - leader.row_index) * leader.line_height + client.offset - leader.offset) < .01
     leader.speed = 120
     leader.paused = False

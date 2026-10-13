@@ -131,3 +131,17 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python test_buffer.py
 ```
 
 This confirms the extra prepared rows and glyph cache exist, then stops supplying source rows and checks that buffered motion continues.
+
+## Bottom margin (v6)
+
+`--bottom-margin N` reserves N wall units at the bottom of the final rotated canvas. With the default 90° counterclockwise rotation, the source baseline and line-number gutter move upward by N units, and long lines wrap to the shorter available height. The overall canvas and viewport rectangles remain the same, preserving screen placement.
+
+Set this on the leader (or standalone viewer); clients receive the shared value. Example using the four-screen wall:
+
+```bash
+./run.sh /usr/src/linux-cachyos --listen 0.0.0.0:47770 \
+  --canvas 7358x2075 --viewport 1366,525,2750,1550 \
+  --bottom-margin 150
+```
+
+The margin is global to the wall, rather than repeated at each monitor's bottom edge. In a wall measured at 100 units per inch, 150 units reserves about 1.5 inches. On a standalone unscaled window these units are Qt logical pixels. `--margin` still controls the existing outer text padding and gutter spacing. Default bottom margin is zero. Update all machines to v6 for consistent rendering.

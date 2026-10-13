@@ -176,6 +176,7 @@ class Viewer(QWidget):
         if self.remote_dimensions:
             return self.remote_dimensions
         width, height = self.args.canvas or (self.width(), self.height())
+        height = max(1, height - self.args.bottom_margin)
         return (height, width) if self.args.rotation in (-90, 90) else (width, height)
 
     def fill(self):
@@ -271,7 +272,7 @@ class Viewer(QWidget):
                 'paused': self.paused, 'speed': self.speed,
                 'velocity': self.speed if moving else 0,
                 'dimensions': self.dimensions(), 'canvas': self.args.canvas or (self.width(), self.height()),
-                'rotation': self.args.rotation, 'font': self.font.family(),
+                'rotation': self.args.rotation, 'bottom_margin': self.args.bottom_margin, 'font': self.font.family(),
                 'font_size': self.font.pixelSize(), 'line_height': self.line_height,
                 'margin': self.margin, 'gutter_width': self.gutter_width, 'code_x': self.code_x,
             })
@@ -308,6 +309,8 @@ class Viewer(QWidget):
         rotation = self.remote_state['rotation'] if self.remote_state else self.args.rotation
         canvas = self.remote_state['canvas'] if self.remote_state else self.args.canvas or (self.width(), self.height())
         wall_width, wall_height = canvas
+        bottom_margin = self.remote_state.get('bottom_margin', 0) if self.remote_state else self.args.bottom_margin
+        content_height = max(1, wall_height - bottom_margin)
         vx, vy, vw, vh = self.args.viewport or (0, 0, wall_width, wall_height)
         if vx + vw > wall_width or vy + vh > wall_height:
             p.setPen(QColor('#f38ba8'))
@@ -322,14 +325,15 @@ class Viewer(QWidget):
         p.setClipRect(QRectF(0, 0, vw * scale, vh * scale))
         p.scale(scale, scale)
         p.translate(-vx, -vy)
+        p.setClipRect(QRectF(0, 0, wall_width, content_height), Qt.ClipOperation.IntersectClip)
         if rotation == -90:
-            p.translate(0, wall_height)
+            p.translate(0, content_height)
             p.rotate(-90)
         elif rotation == 90:
             p.translate(wall_width, 0)
             p.rotate(90)
         elif rotation == 180:
-            p.translate(wall_width, wall_height)
+            p.translate(wall_width, content_height)
             p.rotate(180)
         width, height = self.dimensions()
         p.setFont(self.font)
@@ -409,6 +413,7 @@ def main():
     parser.add_argument('--speed', type=float, default=45, help='Logical pixels per second (default: 45)')
     parser.add_argument('--font-size', type=int, default=20, help='Font size in logical pixels')
     parser.add_argument('--margin', type=int, default=24, help='Viewport and gutter padding in pixels')
+    parser.add_argument('--bottom-margin', type=int, default=0, help='Reserve bottom space in wall units after rotation (leader setting)')
     parser.add_argument('--line-spacing', type=float, default=1.2, help='Line-height multiplier')
     parser.add_argument('--font', default='DejaVu Sans Mono')
     parser.add_argument('--buffer-seconds', type=float, default=6, help='Prepared text lookahead in seconds (minimum 64 rows)')
@@ -434,6 +439,10 @@ def main():
         parser.error('directory must be an existing directory')
     if not math.isfinite(args.buffer_seconds) or not 1 <= args.buffer_seconds <= 60 or not 1 <= args.prefetch_files <= 64:
         parser.error('buffer-seconds must be 1–60 and prefetch-files 1–64')
+    if args.bottom_margin < 0:
+        parser.error('bottom-margin must be nonnegative')
+    if args.canvas and args.bottom_margin >= args.canvas[1]:
+        parser.error('bottom-margin must be smaller than canvas height')
     if args.margin < 0 or not math.isfinite(args.line_spacing) or not 1 <= args.line_spacing <= 3:
         parser.error('margin must be nonnegative and line-spacing must be between 1 and 3')
     if not math.isfinite(args.speed) or args.speed <= 0 or args.font_size < 6 or not 1 <= args.fps <= 240 or args.max_file_bytes < 1:

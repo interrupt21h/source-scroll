@@ -12,7 +12,7 @@ def main():
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     address = f'127.0.0.1:{port}'
-    leader = Viewer(options(listen=address, canvas=(2200, 700)))
+    leader = Viewer(options(listen=address, canvas=(2200, 700), bottom_margin=100))
     left = Viewer(options(connect=address, viewport=(0, 0, 1100, 700)))
     right = Viewer(options(connect=address, viewport=(1100, 0, 1100, 700)))
     leader.resize(2200, 700)
@@ -30,10 +30,15 @@ def main():
     painter.drawImage(1100, 0, right.grab().toImage())
     painter.end()
     assert bytes(expected.constBits()) == bytes(result.constBits()), 'viewport composite differs from wall'
+    for y in range(600, 700):
+        for x in range(2200):
+            assert result.pixelColor(x, y).name() == '#0b0e14', 'reserved bottom margin contains text'
+    assert left.remote_state['bottom_margin'] == 100
+    assert leader.dimensions() == (600, 2200)
     result.save('wall-preview.png')
     for window in (leader, left, right):
         window.close()
-    print('PASS: two network viewports join pixel-for-pixel into one continuous rotated canvas')
+    print('PASS: network viewports join pixel-for-pixel, bottom margin stays blank and shared rotated layout shifts upward')
 
 
 if __name__ == '__main__':
